@@ -9,6 +9,7 @@ import android.os.Environment;
 import android.os.StatFs;
 
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
@@ -19,6 +20,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+
+import android.hardware.camera2.CameraManager;
 
 import android.media.AudioManager;
 import android.media.MediaMetadata;
@@ -48,6 +51,10 @@ import android.widget.TextView;
 import android.text.Editable;
 import android.text.TextWatcher;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -76,6 +83,10 @@ public class MainActivity extends Activity {
     View systemPanel;
     View mediaPanel;
     View settingsPanel;
+    View quickSettingsPanel;
+    View terminalPanel;
+
+    boolean isFlashlightOn = false;
 
     ArrayList<ApplicationInfo> apps = new ArrayList<ApplicationInfo>();
     HashMap<String, String> labelCache = new HashMap<String, String>();
@@ -84,6 +95,10 @@ public class MainActivity extends Activity {
     String currentCategory = "ALL";
     int slotPage = 0;
     final int MAX_SLOT_PAGES = 3;
+
+    File currentTerminalDir;
+    Runnable systemStatsUpdater;
+    TextView liveCpuUsageTv, liveCpuFreqTv, liveRamTv, liveTempTv;
 
     int TEXT = Color.rgb(192,202,245);
     int BLUE = Color.rgb(122,162,247);
@@ -119,6 +134,10 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("wpp", MODE_PRIVATE);
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
 
+        currentTerminalDir = new File("/");
+
+        checkStoragePermissions();
+
         loadTheme();
         slotPage = prefs.getInt("slot_page", 0);
 
@@ -127,6 +146,18 @@ public class MainActivity extends Activity {
         startUpdates();
 
         checkDefaultLauncher();
+    }
+
+    void checkStoragePermissions() {
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) 
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                }, 101);
+            }
+        }
     }
 
     void hideSystemBars() {
@@ -206,7 +237,6 @@ public class MainActivity extends Activity {
         } catch (Throwable e) {}
     }
 
-    /* GLASSMORPHISM DIALOG STYLER */
     void applyGlassStyle(AlertDialog dialog) {
         if (dialog.getWindow() != null) {
             GradientDrawable glassBg = new GradientDrawable();
@@ -374,22 +404,24 @@ public class MainActivity extends Activity {
         sidebar = new LinearLayout(this);
         sidebar.setOrientation(LinearLayout.VERTICAL);
         sidebar.setGravity(Gravity.CENTER_HORIZONTAL);
-        sidebar.setPadding(dp(2), dp(25), dp(2), dp(8));
+        sidebar.setPadding(dp(2), dp(16), dp(2), dp(8));
+
+        int alpha = prefs.getInt("sidebar_alpha", 120);
 
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.argb(120, 10, 12, 20));
+        bg.setColor(Color.argb(alpha, 10, 12, 20));
         bg.setStroke(dp(1), Color.argb(30, 255, 255, 255));
         sidebar.setBackground(bg);
 
         root.addView(sidebar, new FrameLayout.LayoutParams(dp(70), -1, Gravity.LEFT));
 
-        addText(sidebar, "⌁", 26, PURPLE, 50);
+        addText(sidebar, "~", 20, PURPLE, 36);
 
-        clock = addText(sidebar, "00\n00", 14, TEXT, 55);
+        clock = addText(sidebar, "00\n00", 13, TEXT, 44);
 
-        addText(sidebar, new SimpleDateFormat("EEE\ndd", Locale.getDefault()).format(new Date()).toUpperCase(), 10, Color.LTGRAY, 45);
+        addText(sidebar, new SimpleDateFormat("EEE\ndd", Locale.getDefault()).format(new Date()).toUpperCase(), 9, Color.LTGRAY, 36);
 
-        spacer(7);
+        spacer(2);
 
         final LinearLayout slotsBox = new LinearLayout(this);
         slotsBox.setOrientation(LinearLayout.VERTICAL);
@@ -425,49 +457,86 @@ public class MainActivity extends Activity {
             }
         });
 
-        spacer(8);
+        spacer(2);
 
-        addButton(sidebar, "◌", CYAN, 48, new View.OnClickListener() {
+        addControlIconBtn(sidebar, "PWR", "settings", YELLOW(), 32, new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleQuickSettingsPanel();
+            }
+        });
+
+        addControlIconBtn(sidebar, "SYS", "info", CYAN, 32, new View.OnClickListener() {
             public void onClick(View v) {
                 toggleSystem();
             }
         });
 
-        addButton(sidebar, "♫", PURPLE, 48, new View.OnClickListener() {
+        addControlIconBtn(sidebar, "MED", "play", PURPLE, 32, new View.OnClickListener() {
             public void onClick(View v) {
                 toggleMediaPanel();
             }
         });
 
-        addButton(sidebar, "▦", TEXT, 48, new View.OnClickListener() {
+        addControlIconBtn(sidebar, ">_", "code", GREEN, 32, new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleTerminalPanel();
+            }
+        });
+
+        addControlIconBtn(sidebar, "APP", "apps", TEXT, 32, new View.OnClickListener() {
             public void onClick(View v) {
                 toggleDrawer();
             }
         });
 
-        spacer(5);
+        spacer(2);
 
-        battery = addText(sidebar, "--%", 10, GREEN, 40);
+        battery = addText(sidebar, "--%", 10, GREEN, 28);
 
-        addButton(sidebar, "☼", PURPLE, 40, new View.OnClickListener() {
-            public void onClick(View v) {
-                toggleMediaPanel();
-            }
-        });
-
-        addButton(sidebar, "⚙", TEXT, 44, new View.OnClickListener() {
+        addControlIconBtn(sidebar, "SET", "tune", TEXT, 32, new View.OnClickListener() {
             public void onClick(View v) {
                 toggleSettingsPanel();
             }
         });
+    }
 
-        addButton(sidebar, "⚙", TEXT, 44, new View.OnClickListener() {
-            public void onClick(View v) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_SETTINGS));
-                } catch (Exception e) {}
+    void addControlIconBtn(LinearLayout parent, String textFallback, String iconType, int color, int height, View.OnClickListener listener) {
+        boolean useIcons = prefs.getBoolean("sidebar_control_icons", false);
+        if (useIcons) {
+            FrameLayout frame = new FrameLayout(this);
+            
+            ImageView img = new ImageView(this);
+            img.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            img.setColorFilter(color);
+            
+            // Map icon types to built-in drawables or fallback symbols
+            if (iconType.equals("settings")) {
+                img.setImageResource(android.R.drawable.ic_menu_manage);
+            } else if (iconType.equals("info")) {
+                img.setImageResource(android.R.drawable.ic_menu_info_details);
+            } else if (iconType.equals("play")) {
+                img.setImageResource(android.R.drawable.ic_media_play);
+            } else if (iconType.equals("code")) {
+                img.setImageResource(android.R.drawable.ic_menu_send);
+            } else if (iconType.equals("apps")) {
+                img.setImageResource(android.R.drawable.ic_menu_agenda);
+            } else {
+                img.setImageResource(android.R.drawable.ic_menu_preferences);
             }
-        });
+
+            // FIXED: setGravity removed and replaced with proper LayoutParams
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER);
+            frame.addView(img, lp);
+            
+            frame.setOnClickListener(listener);
+            parent.addView(frame, new LinearLayout.LayoutParams(dp(64), dp(height)));
+        } else {
+            addButton(parent, textFallback, color, height, listener);
+        }
+    }
+
+    int YELLOW() {
+        return Color.rgb(224, 175, 104);
     }
 
     String slotKey(int page, int slot) {
@@ -481,11 +550,11 @@ public class MainActivity extends Activity {
         dots.setGravity(Gravity.CENTER);
 
         for (int i = 0; i < MAX_SLOT_PAGES; i++) {
-            TextView dot = text("●", 8, (i == slotPage) ? CYAN : Color.DKGRAY);
+            TextView dot = text("*", 10, (i == slotPage) ? CYAN : Color.DKGRAY);
             dots.addView(dot, new LinearLayout.LayoutParams(dp(14), dp(14)));
         }
 
-        parent.addView(dots, new LinearLayout.LayoutParams(-1, dp(16)));
+        parent.addView(dots, new LinearLayout.LayoutParams(-1, dp(14)));
     }
 
     View wrapIconWithBadge(ImageView icon, String pkg, int width, int height) {
@@ -513,22 +582,39 @@ public class MainActivity extends Activity {
         holder.setGravity(Gravity.CENTER);
         holder.setPadding(dp(3), dp(3), dp(3), dp(3));
 
-        final ImageView icon = new ImageView(this);
+        boolean showIcons = prefs.getBoolean("show_sidebar_icons", true);
         String pkg = prefs.getString(slotKey(page, slot), "");
 
-        if (pkg.length() > 0) {
-            try {
-                icon.setImageDrawable(pm.getApplicationIcon(pkg));
-            } catch (Exception e) {
-                icon.setImageResource(android.R.drawable.sym_def_app_icon);
+        if (showIcons) {
+            final ImageView icon = new ImageView(this);
+            if (pkg.length() > 0) {
+                try {
+                    icon.setImageDrawable(pm.getApplicationIcon(pkg));
+                } catch (Exception e) {
+                    icon.setImageResource(android.R.drawable.sym_def_app_icon);
+                }
+            } else {
+                icon.setImageResource(android.R.drawable.ic_input_add);
+                icon.setColorFilter(BLUE);
             }
+            holder.addView(wrapIconWithBadge(icon, pkg, 44, 44), new LinearLayout.LayoutParams(dp(44), dp(44)));
         } else {
-            icon.setImageResource(android.R.drawable.ic_input_add);
-            icon.setColorFilter(BLUE);
+            String labelText = "+";
+            if (pkg.length() > 0) {
+                String fullLabel = labelCache.get(pkg);
+                if (fullLabel != null && !fullLabel.isEmpty()) {
+                    labelText = fullLabel.length() > 3 ? fullLabel.substring(0, 3).toUpperCase(Locale.getDefault()) : fullLabel;
+                } else {
+                    labelText = "APP";
+                }
+            }
+            TextView slotLabel = text(labelText, 11, CYAN);
+            slotLabel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            slotLabel.setGravity(Gravity.CENTER);
+            holder.addView(slotLabel, new LinearLayout.LayoutParams(dp(44), dp(44)));
         }
 
-        holder.addView(wrapIconWithBadge(icon, pkg, 48, 48), new LinearLayout.LayoutParams(dp(48), dp(48)));
-        parent.addView(holder, new LinearLayout.LayoutParams(dp(66), dp(58)));
+        parent.addView(holder, new LinearLayout.LayoutParams(dp(62), dp(50)));
 
         holder.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -574,6 +660,10 @@ public class MainActivity extends Activity {
     }
 
     void closePanelsExcept(View active) {
+        if (systemStatsUpdater != null) {
+            handler.removeCallbacks(systemStatsUpdater);
+            systemStatsUpdater = null;
+        }
         if (drawer != null && drawer != active) {
             root.removeView(drawer);
             drawer = null;
@@ -590,6 +680,400 @@ public class MainActivity extends Activity {
             root.removeView(settingsPanel);
             settingsPanel = null;
         }
+        if (quickSettingsPanel != null && quickSettingsPanel != active) {
+            root.removeView(quickSettingsPanel);
+            quickSettingsPanel = null;
+        }
+        if (terminalPanel != null && terminalPanel != active) {
+            root.removeView(terminalPanel);
+            terminalPanel = null;
+        }
+    }
+
+    /*
+     * ROOT SHELL TERMINAL WINDOW
+     */
+
+    void toggleTerminalPanel() {
+        if (terminalPanel != null) {
+            root.removeView(terminalPanel);
+            terminalPanel = null;
+            return;
+        }
+        closePanelsExcept(null);
+        showTerminalPanel();
+    }
+
+    void showTerminalPanel() {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.argb(230, 15, 17, 26));
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), Color.argb(100, 125, 207, 255));
+        box.setBackground(bg);
+
+        LinearLayout titleBar = new LinearLayout(this);
+        titleBar.setOrientation(LinearLayout.HORIZONTAL);
+        titleBar.setGravity(Gravity.CENTER_VERTICAL);
+        titleBar.setPadding(dp(4), 0, dp(4), dp(8));
+
+        TextView title = text("root@android:~#", 12, RED);
+        title.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        titleBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+
+        TextView closeBtn = text("[X]", 12, RED);
+        closeBtn.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        closeBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleTerminalPanel();
+            }
+        });
+        titleBar.addView(closeBtn);
+
+        box.addView(titleBar, new LinearLayout.LayoutParams(-1, -2));
+
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.argb(60, 125, 207, 255));
+        box.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+
+        spacer(8);
+
+        final ScrollView scroll = new ScrollView(this);
+        final TextView consoleOutput = new TextView(this);
+        consoleOutput.setText("WPP Root Shell\nExecuted via SU permissions.\n\n");
+        consoleOutput.setTextColor(TEXT);
+        consoleOutput.setTextSize(12);
+        consoleOutput.setTypeface(Typeface.MONOSPACE);
+
+        scroll.addView(consoleOutput);
+        box.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        LinearLayout inputRow = new LinearLayout(this);
+        inputRow.setOrientation(LinearLayout.HORIZONTAL);
+        inputRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView prompt = text("# ", 12, RED);
+        prompt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        inputRow.addView(prompt);
+
+        final EditText cmdInput = new EditText(this);
+        cmdInput.setTextColor(TEXT);
+        cmdInput.setTextSize(12);
+        cmdInput.setTypeface(Typeface.MONOSPACE);
+        cmdInput.setBackground(null);
+        cmdInput.setSingleLine(true);
+        cmdInput.setPadding(0, 0, 0, 0);
+
+        cmdInput.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                String cmd = cmdInput.getText().toString().trim();
+                if (!cmd.isEmpty()) {
+                    handleTerminalCommand(cmd, consoleOutput);
+                    cmdInput.setText("");
+                    scroll.post(new Runnable() {
+                        public void run() {
+                            scroll.fullScroll(View.FOCUS_DOWN);
+                        }
+                    });
+                }
+                return true;
+            }
+        });
+
+        inputRow.addView(cmdInput, new LinearLayout.LayoutParams(-1, -2));
+        box.addView(inputRow, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(310), dp(260));
+        p.leftMargin = dp(78);
+        p.topMargin = dp(70);
+
+        root.addView(box, p);
+        terminalPanel = box;
+        animateIn(box);
+    }
+
+    void handleTerminalCommand(final String cmd, final TextView output) {
+        String trimmed = cmd.trim();
+        if (trimmed.equalsIgnoreCase("clear")) {
+            output.setText("");
+            return;
+        }
+
+        output.append("# " + trimmed + "\n");
+
+        if (trimmed.equalsIgnoreCase("help")) {
+            output.append("Root Shell Execution Mode:\n");
+            output.append(" cd <path> - Change directory\n");
+            output.append(" pwd - Print current directory\n");
+            output.append(" clear - Clear console view\n\n");
+            return;
+        }
+
+        if (trimmed.startsWith("cd ") || trimmed.equalsIgnoreCase("cd")) {
+            String targetPath = trimmed.length() > 3 ? trimmed.substring(3).trim() : "/";
+            File targetDir = targetPath.startsWith("/") ? new File(targetPath) : new File(currentTerminalDir, targetPath);
+
+            if (targetDir.exists() && targetDir.isDirectory()) {
+                currentTerminalDir = targetDir;
+                output.append("Directory changed to: " + currentTerminalDir.getAbsolutePath() + "\n\n");
+            } else {
+                output.append("cd: no such file or directory: " + targetPath + "\n\n");
+            }
+            return;
+        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final StringBuilder result = new StringBuilder();
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("su", "-c", "cd " + currentTerminalDir.getAbsolutePath() + " && " + cmd);
+                    pb.redirectErrorStream(true);
+
+                    Process process = pb.start();
+
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        result.append(line).append("\n");
+                    }
+                    reader.close();
+                    process.waitFor();
+                } catch (Exception e) {
+                    result.append("Root Shell Error: ").append(e.getMessage()).append("\n");
+                }
+
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        output.append(result.toString() + "\n");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /*
+     * QUICK SETTINGS TILES TAB
+     */
+
+    void toggleQuickSettingsPanel() {
+        if (quickSettingsPanel != null) {
+            root.removeView(quickSettingsPanel);
+            quickSettingsPanel = null;
+            return;
+        }
+        closePanelsExcept(null);
+        showQuickSettingsPanel();
+    }
+
+    void showQuickSettingsPanel() {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.argb(180, 18, 20, 32));
+        bg.setCornerRadius(dp(22));
+        bg.setStroke(dp(1), Color.argb(50, 224, 175, 104));
+        box.setBackground(bg);
+
+        TextView title = text("QUICK TOGGLES", 14, YELLOW());
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setGravity(Gravity.CENTER);
+        box.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+        spacer(14);
+
+        LinearLayout row1 = createTileRow();
+        LinearLayout row2 = createTileRow();
+        LinearLayout row3 = createTileRow();
+
+        View wifiTile = createTile("WIFI", "Wi-Fi", true, new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));
+                } catch (Exception e) {}
+            }
+        });
+
+        View btTile = createTile("BT", "Bluetooth", true, new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
+                } catch (Exception e) {}
+            }
+        });
+
+        final View flashTile = createTile(isFlashlightOn ? "FLASH ON" : "FLASH OFF", "Flashlight", isFlashlightOn, null);
+        flashTile.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleFlashlight(flashTile);
+            }
+        });
+
+        boolean autoRotate = isAutoRotateOn();
+        final View rotateTile = createTile("ROTATE", "Auto-Rotate", autoRotate, null);
+        rotateTile.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleAutoRotate(rotateTile);
+            }
+        });
+
+        boolean isNormalSound = audio.getRingerMode() == AudioManager.RINGER_MODE_NORMAL;
+        final View soundTile = createTile(isNormalSound ? "SOUND" : "SILENT", "Ringer Mode", isNormalSound, null);
+        soundTile.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                toggleRingerMode(soundTile);
+            }
+        });
+
+        View locationTile = createTile("GPS", "Location", true, new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                } catch (Exception e) {}
+            }
+        });
+
+        row1.addView(wifiTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+        row1.addView(btTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+
+        row2.addView(flashTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+        row2.addView(rotateTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+
+        row3.addView(soundTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+        row3.addView(locationTile, new LinearLayout.LayoutParams(0, dp(64), 1));
+
+        box.addView(row1);
+        box.addView(row2);
+        box.addView(row3);
+
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(290), -2);
+        p.leftMargin = dp(78);
+        p.topMargin = dp(90);
+
+        root.addView(box, p);
+        quickSettingsPanel = box;
+        animateIn(box);
+    }
+
+    LinearLayout createTileRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(4), 0, dp(4));
+        row.setLayoutParams(lp);
+        return row;
+    }
+
+    View createTile(String iconStr, String labelStr, boolean active, View.OnClickListener clickListener) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER);
+        tile.setPadding(dp(6), dp(8), dp(6), dp(8));
+
+        updateTileStyle(tile, active);
+
+        TextView icon = text(iconStr, 13, active ? CYAN : Color.GRAY);
+        icon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        icon.setGravity(Gravity.CENTER);
+
+        TextView label = text(labelStr, 11, TEXT);
+        label.setGravity(Gravity.CENTER);
+
+        tile.addView(icon);
+        tile.addView(label);
+
+        if (clickListener != null) {
+            tile.setOnClickListener(clickListener);
+        }
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(64), 1);
+        params.setMargins(dp(4), dp(4), dp(4), dp(4));
+        tile.setLayoutParams(params);
+
+        return tile;
+    }
+
+    void updateTileStyle(View tile, boolean active) {
+        GradientDrawable bg = new GradientDrawable();
+        if (active) {
+            bg.setColor(Color.argb(80, 122, 162, 247));
+            bg.setStroke(dp(1), Color.argb(120, 125, 207, 255));
+        } else {
+            bg.setColor(Color.argb(30, 255, 255, 255));
+            bg.setStroke(dp(1), Color.argb(20, 255, 255, 255));
+        }
+        bg.setCornerRadius(dp(14));
+        tile.setBackground(bg);
+    }
+
+    void toggleFlashlight(View tileView) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            try {
+                CameraManager cm = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+                String cameraId = cm.getCameraIdList()[0];
+                isFlashlightOn = !isFlashlightOn;
+                cm.setTorchMode(cameraId, isFlashlightOn);
+
+                updateTileStyle(tileView, isFlashlightOn);
+                TextView icon = (TextView) ((LinearLayout) tileView).getChildAt(0);
+                icon.setText(isFlashlightOn ? "FLASH ON" : "FLASH OFF");
+                icon.setTextColor(isFlashlightOn ? CYAN : Color.GRAY);
+            } catch (Exception e) {}
+        }
+    }
+
+    boolean isAutoRotateOn() {
+        try {
+            return Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0) == 1;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    void toggleAutoRotate(View tileView) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            if (!Settings.System.canWrite(this)) {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+                return;
+            }
+        }
+        try {
+            boolean currentState = isAutoRotateOn();
+            Settings.System.putInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, currentState ? 0 : 1);
+
+            boolean newState = !currentState;
+            updateTileStyle(tileView, newState);
+            TextView icon = (TextView) ((LinearLayout) tileView).getChildAt(0);
+            icon.setTextColor(newState ? CYAN : Color.GRAY);
+        } catch (Exception e) {}
+    }
+
+    void toggleRingerMode(View tileView) {
+        try {
+            int currentMode = audio.getRingerMode();
+            if (currentMode == AudioManager.RINGER_MODE_NORMAL) {
+                audio.setRingerMode(AudioManager.RINGER_MODE_VIBRATE);
+                updateTileStyle(tileView, false);
+                TextView icon = (TextView) ((LinearLayout) tileView).getChildAt(0);
+                icon.setText("SILENT");
+                icon.setTextColor(Color.GRAY);
+            } else {
+                audio.setRingerMode(AudioManager.RINGER_MODE_NORMAL);
+                updateTileStyle(tileView, true);
+                TextView icon = (TextView) ((LinearLayout) tileView).getChildAt(0);
+                icon.setText("SOUND");
+                icon.setTextColor(CYAN);
+            }
+        } catch (Exception e) {}
     }
 
     /*
@@ -952,7 +1436,7 @@ public class MainActivity extends Activity {
     }
 
     /*
-     * FASTFETCH SYSTEM PANEL
+     * FASTFETCH & REAL-TIME SYSTEM STATS PANEL
      */
 
     void toggleSystem() {
@@ -1000,42 +1484,46 @@ public class MainActivity extends Activity {
         android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
         am.getMemoryInfo(mi);
         long totalRam = mi.totalMem / 1048576L;
-        long usedRam = (mi.totalMem - mi.availMem) / 1048576L;
 
         StatFs fs = new StatFs(Environment.getDataDirectory().getPath());
         long totalStorage = fs.getTotalBytes() / 1073741824L;
         long usedStorage = (fs.getTotalBytes() - fs.getAvailableBytes()) / 1073741824L;
 
-        addFastfetchRow(statsList, "OS", "Android " + android.os.Build.VERSION.RELEASE + " (" + android.os.Build.VERSION.SDK_INT + ")");
+        addFastfetchRow(statsList, "OS", "Android " + android.os.Build.VERSION.RELEASE);
         addFastfetchRow(statsList, "Host", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL);
         addFastfetchRow(statsList, "Uptime", getUptime());
         addFastfetchRow(statsList, "Resolution", dm.widthPixels + "x" + dm.heightPixels);
-        addFastfetchRow(statsList, "CPU/HW", android.os.Build.HARDWARE);
-        addFastfetchRow(statsList, "Memory", usedRam + "MiB / " + totalRam + "MiB");
+        
+        liveCpuUsageTv = addFastfetchRow(statsList, "CPU Usage", "Calculating...");
+        liveCpuFreqTv = addFastfetchRow(statsList, "CPU Freq", readCpuFreq());
+        liveRamTv = addFastfetchRow(statsList, "RAM Usage", "...");
+        liveTempTv = addFastfetchRow(statsList, "Temperature", readCpuTemp());
+        
         addFastfetchRow(statsList, "Storage", usedStorage + "GiB / " + totalStorage + "GiB");
-        addFastfetchRow(statsList, "Locale", Locale.getDefault().getDisplayName());
 
         scroll.addView(statsList);
         box.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         TextView colorBlocks = new TextView(this);
-        colorBlocks.setText("\n● ● ● ● ● ● ● ●");
+        colorBlocks.setText("\n[#] [#] [#] [#] [#] [#] [#]");
         colorBlocks.setTextSize(13);
         colorBlocks.setTextColor(CYAN);
         colorBlocks.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         colorBlocks.setGravity(Gravity.CENTER_HORIZONTAL);
         box.addView(colorBlocks, new LinearLayout.LayoutParams(-1, -2));
 
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(320), dp(340));
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(320), dp(360));
         p.leftMargin = dp(78);
         p.topMargin = dp(60);
 
         root.addView(box, p);
         systemPanel = box;
         animateIn(box);
+
+        startLiveStatsUpdates(am);
     }
 
-    void addFastfetchRow(LinearLayout container, String key, String value) {
+    TextView addFastfetchRow(LinearLayout container, String key, String value) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(0, dp(2), 0, dp(2));
@@ -1055,10 +1543,94 @@ public class MainActivity extends Activity {
         row.addView(keyTv);
         row.addView(valTv);
         container.addView(row);
+        return valTv;
+    }
+
+    void startLiveStatsUpdates(final android.app.ActivityManager am) {
+        systemStatsUpdater = new Runnable() {
+            public void run() {
+                if (systemPanel == null) return;
+
+                // RAM Calculation
+                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                long totalRam = mi.totalMem / 1048576L;
+                long usedRam = (mi.totalMem - mi.availMem) / 1048576L;
+                if (liveRamTv != null) {
+                    liveRamTv.setText(usedRam + "MiB / " + totalRam + "MiB (" + (100 * usedRam / totalRam) + "%)");
+                }
+
+                // CPU Frequency & Temp
+                if (liveCpuFreqTv != null) liveCpuFreqTv.setText(readCpuFreq());
+                if (liveTempTv != null) liveTempTv.setText(readCpuTemp());
+                if (liveCpuUsageTv != null) liveCpuUsageTv.setText(readCpuUsageEstimation());
+
+                handler.postDelayed(this, 2000);
+            }
+        };
+        handler.post(systemStatsUpdater);
+    }
+
+    String readCpuFreq() {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")));
+            String line = reader.readLine();
+            reader.close();
+            if (line != null) {
+                int mhz = Integer.parseInt(line.trim()) / 1000;
+                return mhz + " MHz";
+            }
+        } catch (Exception e) {}
+        return "N/A";
+    }
+
+    String readCpuTemp() {
+        try {
+            File thermalDir = new File("/sys/class/thermal/");
+            File[] files = thermalDir.listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    if (f.getName().startsWith("thermal_zone")) {
+                        BufferedReader typeReader = new BufferedReader(new InputStreamReader(new FileInputStream(new File(f, "type"))));
+                        String type = typeReader.readLine();
+                        typeReader.close();
+                        if (type != null && (type.toLowerCase().contains("cpu") || type.toLowerCase().contains("soc") || type.toLowerCase().contains("processor"))) {
+                            BufferedReader tempReader = new BufferedReader(new InputStreamReader(new FileInputStream(new File(f, "temp"))));
+                            String tempStr = tempReader.readLine();
+                            tempReader.close();
+                            if (tempStr != null) {
+                                float temp = Float.parseFloat(tempStr.trim());
+                                if (temp > 1000) temp = temp / 1000f; // handle milli-degrees
+                                return temp + " °C";
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {}
+        return "Unavailable";
+    }
+
+    String readCpuUsageEstimation() {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream("/proc/stat")));
+            String line = reader.readLine();
+            reader.close();
+            if (line != null && line.startsWith("cpu")) {
+                String[] toks = line.trim().split("\\s+");
+                long idle = Long.parseLong(toks[4]);
+                long total = 0;
+                for (int i = 1; i < toks.length; i++) {
+                    total += Long.parseLong(toks[i]);
+                }
+                return "~" + (100 * (total - idle) / Math.max(1, total)) + "%";
+            }
+        } catch (Exception e) {}
+        return "Active";
     }
 
     /*
-     * NOCTALIA SHELL MEDIA & CONTROLS PANEL
+     * MEDIA & CONTROLS PANEL
      */
 
     void toggleMediaPanel() {
@@ -1082,7 +1654,7 @@ public class MainActivity extends Activity {
         bg.setStroke(dp(1), Color.argb(50, 187, 154, 247));
         box.setBackground(bg);
 
-        TextView title = text("QUICK CONTROLS", 14, PURPLE);
+        TextView title = text("MEDIA CONTROLS", 14, PURPLE);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setGravity(Gravity.CENTER);
         box.addView(title, new LinearLayout.LayoutParams(-1, -2));
@@ -1119,7 +1691,8 @@ public class MainActivity extends Activity {
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setGravity(Gravity.CENTER);
 
-        TextView prevBtn = text("⏮", 22, CYAN);
+        TextView prevBtn = text("<<", 16, CYAN);
+        prevBtn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         prevBtn.setPadding(dp(16), dp(8), dp(16), dp(8));
         prevBtn.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -1130,7 +1703,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        TextView playBtn = text("⏯", 28, GREEN);
+        TextView playBtn = text(">/||", 16, GREEN);
+        playBtn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         playBtn.setPadding(dp(20), dp(8), dp(20), dp(8));
         playBtn.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -1141,7 +1715,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        TextView nextBtn = text("⏭", 22, CYAN);
+        TextView nextBtn = text(">>", 16, CYAN);
+        nextBtn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         nextBtn.setPadding(dp(16), dp(8), dp(16), dp(8));
         nextBtn.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -1164,7 +1739,6 @@ public class MainActivity extends Activity {
         volLabel.setGravity(Gravity.CENTER);
         box.addView(volLabel, new LinearLayout.LayoutParams(-1, -2));
 
-        /* MODERN TRANSLUCENT VOLUME SEEKBAR */
         SeekBar volume = new SeekBar(this);
         int maxVol = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
         volume.setMax(maxVol);
@@ -1191,7 +1765,6 @@ public class MainActivity extends Activity {
         brightLabel.setGravity(Gravity.CENTER);
         box.addView(brightLabel, new LinearLayout.LayoutParams(-1, -2));
 
-        /* MODERN TRANSLUCENT BRIGHTNESS SEEKBAR */
         SeekBar brightness = new SeekBar(this);
         int curBrightness = 127;
         try {
@@ -1275,7 +1848,7 @@ public class MainActivity extends Activity {
     }
 
     /*
-     * WPP SETTINGS DRAWER PANEL
+     * SETTINGS DRAWER PANEL
      */
 
     void toggleSettingsPanel() {
@@ -1306,9 +1879,15 @@ public class MainActivity extends Activity {
 
         spacer(12);
 
+        boolean iconsEnabled = prefs.getBoolean("show_sidebar_icons", true);
+        boolean controlIconsEnabled = prefs.getBoolean("sidebar_control_icons", false);
+
         String[] items = {
                 "Choose Wallpaper",
                 "Customize Sidebar",
+                "Sidebar Icons: " + (iconsEnabled ? "ON" : "OFF"),
+                "Sidebar Control Icons: " + (controlIconsEnabled ? "ICONS" : "TEXT"),
+                "Sidebar Translucency",
                 "Manage Categories",
                 "App Drawer",
                 "Theme",
@@ -1336,10 +1915,20 @@ public class MainActivity extends Activity {
                     } else if (index == 1) {
                         showSidebarHelp();
                     } else if (index == 2) {
-                        manageCategories();
+                        boolean current = prefs.getBoolean("show_sidebar_icons", true);
+                        prefs.edit().putBoolean("show_sidebar_icons", !current).apply();
+                        rebuildSidebar();
                     } else if (index == 3) {
-                        toggleDrawer();
+                        boolean current = prefs.getBoolean("sidebar_control_icons", false);
+                        prefs.edit().putBoolean("sidebar_control_icons", !current).apply();
+                        rebuildSidebar();
                     } else if (index == 4) {
+                        chooseSidebarTranslucency();
+                    } else if (index == 5) {
+                        manageCategories();
+                    } else if (index == 6) {
+                        toggleDrawer();
+                    } else if (index == 7) {
                         chooseTheme();
                     } else {
                         showAbout();
@@ -1357,6 +1946,47 @@ public class MainActivity extends Activity {
         root.addView(box, p);
         settingsPanel = box;
         animateIn(box);
+    }
+
+    void chooseSidebarTranslucency() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(20), dp(16), dp(20), dp(16));
+
+        int currentAlpha = prefs.getInt("sidebar_alpha", 120);
+        final TextView valText = text("Alpha Opacity: " + currentAlpha + " / 255", 13, CYAN);
+        valText.setGravity(Gravity.CENTER);
+        layout.addView(valText);
+
+        final SeekBar sb = new SeekBar(this);
+        sb.setMax(255);
+        sb.setProgress(currentAlpha);
+        sb.setProgressTintList(ColorStateList.valueOf(CYAN));
+        sb.setThumbTintList(ColorStateList.valueOf(PURPLE));
+
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                valText.setText("Alpha Opacity: " + progress + " / 255");
+            }
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+
+        layout.addView(sb, new LinearLayout.LayoutParams(-1, dp(40)));
+
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle("SIDEBAR TRANSLUCENCY")
+                .setView(layout)
+                .setPositiveButton("Save", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        prefs.edit().putInt("sidebar_alpha", sb.getProgress()).apply();
+                        rebuildSidebar();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+        d.show();
+        applyGlassStyle(d);
     }
 
     /*
@@ -1494,7 +2124,7 @@ public class MainActivity extends Activity {
     void showAbout() {
         AlertDialog d = new AlertDialog.Builder(this)
                 .setTitle("WPP Launcher")
-                .setMessage("WPP Launcher v0.3")
+                .setMessage("WPP Launcher v0.8 (Live Stats & Icon Toggles)")
                 .setPositiveButton("OK", null)
                 .create();
         d.show();
@@ -1578,7 +2208,7 @@ public class MainActivity extends Activity {
 
                 if (battery != null) {
                     BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
-                    int level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                    int level = bm != null ? bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) : 0;
                     battery.setText(level + "%");
 
                     if (level <= 20) {
@@ -1618,14 +2248,14 @@ public class MainActivity extends Activity {
     }
 
     void addButton(LinearLayout parent, String value, int color, int height, View.OnClickListener listener) {
-        TextView v = addText(parent, value, 21, color, height);
+        TextView v = addText(parent, value, 12, color, height);
+        v.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         v.setOnClickListener(listener);
     }
 
     TextView text(String value, float size, int color) {
         TextView v = new TextView(this);
         v.setText(value);
-        v.setTextSize(size);
         v.setTextColor(color);
         return v;
     }
